@@ -40,6 +40,7 @@ button:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px soli
 #stage{position:fixed;inset:0;background:#000}
 #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 #cam.mirror{transform:scaleX(-1)}
+#cam.fit{object-fit:contain}
 
 #band{position:absolute;left:0;right:0;top:0;
   padding-top:env(safe-area-inset-top,0px);
@@ -113,7 +114,7 @@ button:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px soli
 #stage.land:not(.side) #recBtn span{width:42px;height:42px}
 #stage.land:not(.side) #recBtn.recording span{width:24px;height:24px}
 #posBtn{display:none}
-.label.res{min-width:0;font-weight:700;font-variant-numeric:tabular-nums}
+.label.res{min-width:0;white-space:nowrap;font-weight:700;font-variant-numeric:tabular-nums}
 .label.res:empty{display:none}
 .label.res.low{color:#ffb4a8}
 #fullBtn,#keys{display:none}
@@ -168,6 +169,14 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
     <label class="field" for="sideWIn">Sideways column width <input id="sideWIn" type="range" min="25" max="60" value="40"></label>
   </div>
   <div class="row">
+    <label class="field" for="viewIn">Camera view
+      <select id="viewIn" style="font:inherit;font-size:15px;padding:10px;border-radius:10px;background:#14181d;color:var(--fg);border:1px solid #2a3038">
+        <option value="wide">Widest view (4:3, shows more of you)</option>
+        <option value="hd">Widescreen HD (16:9, tighter)</option>
+      </select>
+    </label>
+  </div>
+  <div class="row">
     <label class="check" for="mirrorIn"><input id="mirrorIn" type="checkbox" checked> Mirror camera preview</label>
     <label class="check" for="flipIn"><input id="flipIn" type="checkbox"> Flip text (glass rig)</label>
   </div>
@@ -180,6 +189,7 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
     <li>Keep the prompter height low and the column narrow so your eyes barely move.</li>
     <li>Tap the text to pause. Swipe it to jump back or ahead.</li>
     <li>The saved video shows only you. The script never appears in the recording.</li>
+    <li>If you look too close, keep Camera view on Widest and the preview on Fit, which shows exactly what gets recorded. Fill covers the screen but hides the edges.</li>
     <li>The label next to the size buttons shows the camera's real resolution. Face a window or a lamp: in dim light phones lower the frame rate and the picture gets soft.</li>
     <li>On a laptop, the script sits in a narrow strip right under the webcam. Keyboard: Space to play or pause, R to record, arrow keys for speed, F for full screen.</li>
     <li>Turn the phone sideways for landscape. The script moves into a column beside the camera, with the reading line level with the lens. Pick the orientation before you hit record, and turn off rotation lock.</li>
@@ -206,6 +216,7 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
       </div>
       <div class="group">
         <span class="label res" id="resLabel" aria-label="Camera resolution"></span>
+        <button class="chip" id="fitBtn" aria-label="Preview framing">Fit</button>
         <button class="chip" id="fullBtn" aria-label="Full screen">⛶</button>
         <button class="chip" id="posBtn" aria-label="Move text">⇆ Auto</button>
         <button class="chip" id="fsDown" aria-label="Smaller text">A−</button>
@@ -248,8 +259,10 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
     fs: store.get('fs', 30), sp: store.get('sp', 6),
     band: store.get('band', 32), col: store.get('col', 100),
     mirror: store.get('mirror', true), flip: store.get('flip', false),
-    landPos: store.get('landPos', 'auto'), sideW: store.get('sideW', 40)
+    landPos: store.get('landPos', 'auto'), sideW: store.get('sideW', 40),
+    view: store.get('view', 'wide'), fit: store.get('fit', 'fit')
   };
+  $('viewIn').value = s.view;
   $('script').value = s.script;
   $('landPosIn').value = s.landPos; $('sideWIn').value = s.sideW;
   $('fsIn').value = s.fs; $('spIn').value = s.sp; $('bandIn').value = s.band; $('colIn').value = s.col;
@@ -291,6 +304,9 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
     root.setProperty('--col', s.col + '%');
     root.setProperty('--side-w', s.sideW + 'vw');
     $('cam').classList.toggle('mirror', s.mirror);
+    $('cam').classList.toggle('fit', s.fit === 'fit');
+    $('fitBtn').textContent = s.fit === 'fit' ? 'Fit' : 'Fill';
+    $('fitBtn').title = s.fit === 'fit' ? 'Showing the whole recorded picture' : 'Filling the screen (edges hidden, still recorded)';
     text.classList.toggle('flip', s.flip);
     $('spLabel').textContent = 'Speed ' + s.sp;
     $('posBtn').textContent = '⇆ ' + posNames[s.landPos];
@@ -324,19 +340,33 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
     const track = stream?.getVideoTracks()[0];
     if (!track || sharpening || (recorder && recorder.state === 'recording')) return;
     sharpening = true;
-    const px = () => { const st = track.getSettings(); return (st.width || 0) * (st.height || 0); };
-    const tries = [[1920,1080],[1080,1920],[1280,720],[720,1280]];
-    let best = null, bestPx = px();
+    const wide = s.view !== 'hd';
+    const want = wide ? 4/3 : 16/9;
+    // Score: right shape first (4:3 uses the whole sensor, 16:9 is a crop), then most pixels.
+    const score = () => {
+      const st = track.getSettings(), w = st.width || 0, h = st.height || 0;
+      const r = Math.max(w, h) / Math.max(1, Math.min(w, h));
+      return (Math.abs(r - want) < 0.06 ? 1e8 : 0) + w * h;
+    };
+    const tries = wide
+      ? [[1920,1440],[1440,1920],[1440,1080],[1080,1440],[1280,960],[960,1280],[640,480]]
+      : [[1920,1080],[1080,1920],[1280,720],[720,1280]];
+    let best = null, bestScore = score();
     for (const [w,h] of tries) {
       try {
-        await track.applyConstraints({ width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 30 } });
+        await track.applyConstraints({ width: { ideal: w }, height: { ideal: h }, aspectRatio: { ideal: w / h }, frameRate: { ideal: 30 } });
         await new Promise(r => setTimeout(r, 150));
-        const n = px();
-        if (n > bestPx) { bestPx = n; best = [w,h]; }
-        if (n >= 1920*1080) break;
+        const n = score();
+        if (n > bestScore) { bestScore = n; best = [w,h]; }
+        if (n >= 1e8 + 1440 * 1080) break;
       } catch {}
     }
-    if (best) { try { await track.applyConstraints({ width: { ideal: best[0] }, height: { ideal: best[1] }, frameRate: { ideal: 30 } }); } catch {} }
+    if (best) { try { await track.applyConstraints({ width: { ideal: best[0] }, height: { ideal: best[1] }, aspectRatio: { ideal: best[0] / best[1] }, frameRate: { ideal: 30 } }); } catch {} }
+    // Some phones expose digital zoom; make sure it is all the way out.
+    try {
+      const caps = track.getCapabilities?.();
+      if (caps?.zoom && typeof caps.zoom.min === 'number') await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+    } catch {}
     sharpening = false;
     showRes();
   }
@@ -345,7 +375,9 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
     const short = Math.min(st.width || 0, st.height || 0);
     const name = short >= 1080 ? '1080p' : short >= 720 ? '720p' : short ? short + 'p' : '';
     const el = $('resLabel');
-    el.textContent = name;
+    const r = st.width && st.height ? Math.max(st.width, st.height) / Math.min(st.width, st.height) : 0;
+    const shape = !r ? '' : Math.abs(r - 4/3) < 0.06 ? ' · 4:3' : Math.abs(r - 16/9) < 0.06 ? ' · 16:9' : '';
+    el.textContent = name ? name + shape : '';
     el.title = st.width ? st.width + '×' + st.height + (st.frameRate ? ' at ' + Math.round(st.frameRate) + ' fps' : '') : '';
     el.classList.toggle('low', short > 0 && short < 720);
   }
@@ -367,10 +399,10 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
     s.script = $('script').value;
     s.fs = +$('fsIn').value; s.sp = +$('spIn').value; s.band = +$('bandIn').value; s.col = +$('colIn').value;
     s.mirror = $('mirrorIn').checked; s.flip = $('flipIn').checked;
-    s.landPos = $('landPosIn').value; s.sideW = +$('sideWIn').value;
+    s.landPos = $('landPosIn').value; s.sideW = +$('sideWIn').value; s.view = $('viewIn').value;
     for (const k in s) store.set(k, s[k]);
   }
-  ['fsIn','spIn','bandIn','colIn','mirrorIn','flipIn','script','landPosIn','sideWIn'].forEach(id => $(id).addEventListener('change', save));
+  ['fsIn','spIn','bandIn','colIn','mirrorIn','flipIn','script','landPosIn','sideWIn','viewIn'].forEach(id => $(id).addEventListener('change', save));
 
   // ---------- camera ----------
   async function openCamera(){
@@ -381,7 +413,9 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
     }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+        video: s.view === 'hd'
+          ? { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } }
+          : { facingMode: 'user', width: { ideal: 1440 }, height: { ideal: 1080 }, aspectRatio: { ideal: 4/3 }, frameRate: { ideal: 30 } },
         audio: { echoCancellation: true, noiseSuppression: true }
       });
     } catch (e) {
@@ -443,6 +477,9 @@ That's it. Try it for one week and tell me in the comments how it went.</textare
   $('spDown').onclick = () => { s.sp = Math.max(1, s.sp - 1); store.set('sp', s.sp); $('spIn').value = s.sp; applyLook(); };
   $('fsUp').onclick = () => { s.fs = Math.min(64, s.fs + 2); store.set('fs', s.fs); $('fsIn').value = s.fs; applyLook(); };
   $('fsDown').onclick = () => { s.fs = Math.max(18, s.fs - 2); store.set('fs', s.fs); $('fsIn').value = s.fs; applyLook(); };
+  $('fitBtn').onclick = () => {
+    s.fit = s.fit === 'fit' ? 'fill' : 'fit'; store.set('fit', s.fit); applyLook();
+  };
   $('posBtn').onclick = () => {
     const order = ['auto', 'left', 'right', 'top'];
     s.landPos = order[(order.indexOf(s.landPos) + 1) % order.length];
